@@ -3,9 +3,9 @@ import pytest
 from app.core.loaders import (
     EmptyDocumentError, LoadedDocument, PageSpan, UnsupportedFormatError,
     assemble_pages, discover_corpus, extract_title, load_document,
-    normalize, slugify,
+    looks_like_heading, normalize, slugify, split_frontmatter,
+    strip_markdown_noise, strip_repeated_lines, unwrap_soft_linebreaks,
 )
-
 
 # ── normalization ────────────────────────────────────────────────────────
 
@@ -70,11 +70,31 @@ def test_slugify_is_stable_and_safe():
     assert len(slugify("a")) >= 3          # padded to a usable length
 
 
-def test_extract_title_prefers_markdown_h1():
-    assert extract_title("# Security Policy\n\nbody", "fallback") == "Security Policy"
-    assert extract_title("no heading here", "my_doc-name") == "my doc name"
+def test_extract_title_precedence():
+    """Four tiers, highest first: frontmatter → markdown H1 → first
+    heading-like line (the PDF case) → tidied filename."""
+    # 1. frontmatter wins outright
+    assert extract_title(
+        "# Ignored Heading", "fallback", frontmatter_title="Personal Data Requests"
+    ) == "Personal Data Requests"
 
+    # 2. markdown H1 beats a heading-like first line
+    assert extract_title(
+        "Some Line\n\n# Security Policy\n\nbody", "fallback"
+    ) == "Security Policy"
 
+    # 3. PDF case — first line is the title, with no marker
+    assert extract_title(
+        "Privacy Management Policy\n(Last Updated February 2026)\n"
+        "Purpose\nOur Data Privacy Policy aims to establish...",
+        "fallback",
+    ) == "Privacy Management Policy"
+
+    # 4. nothing heading-like → tidied filename
+    assert extract_title(
+        "This document opens straight into a long prose sentence that ends in a period.",
+        "my_doc-name",
+    ) == "my doc name"
 # ── load_document ────────────────────────────────────────────────────────
 
 def test_load_markdown(tmp_path):
@@ -125,3 +145,212 @@ def test_discover_corpus_is_sorted_and_filtered(tmp_path):
 
     found = [p.name for p in discover_corpus(tmp_path)]
     assert found == ["a.txt", "b.md"]
+
+
+# ── soft line-break unwrapping (pypdf layout mode) ───────────────────────
+
+def test_unwrap_joins_wrapped_sentences_but_keeps_headings():
+    """Verbatim shape of the SANS layout-mode extraction."""
+    raw = (
+        "Privacy Management Policy\n"
+        "(Last Updated February 2026)\n"
+        "Purpose\n"
+        "Our Data Privacy Policy aims to establish a comprehensive framework for protecting the\n"
+        "privacy and confidentiality of personal and sensitive data entrusted to our organization.\n"
+        "This policy aims to provide clear guidelines and procedures for data collection, storage,\n"
+        "use, disclosure, and disposal in compliance with applicable privacy laws."
+    )
+    lines = unwrap_soft_linebreaks(raw).split("\n")
+
+    assert "Purpose" in lines                       # heading survives alone
+    assert any(l.startswith("Our Data Privacy Policy") and
+               "privacy and confidentiality" in l for l in lines)
+    assert any(l.startswith("This policy aims") for l in lines)   # new sentence
+    assert not any(l.startswith("privacy and") for l in lines)    # was joined
+
+
+def test_unwrap_leaves_bullets_alone():
+    raw = "Requirements:\n- encrypt data at rest\n- rotate keys annually"
+    assert unwrap_soft_linebreaks(raw).split("\n") == [
+        "Requirements:", "- encrypt data at rest", "- rotate keys annually"
+    ]
+
+
+def test_unwrap_is_idempotent():
+    raw = "a sentence that wraps across\nthe line boundary here.\nA new one."
+    once = unwrap_soft_linebreaks(raw)
+    assert unwrap_soft_linebreaks(once) == once
+
+
+def test_normalize_still_idempotent_after_unwrapping():
+    messy = (
+        "   Privacy Management Policy   \n"
+        "Purpose\n"
+        "Our policy aims to protect the\n"
+        "privacy of personal data.\n\n\n\n"
+    )
+    once = normalize(messy)
+    assert normalize(once) == once
+
+
+# ── running headers/footers ──────────────────────────────────────────────
+
+def _fake_page(n: int, heading: str, body: str) -> str:
+    """Realistic page shape: header lines, distinct body, footer."""
+    return "\n".join([
+        f"Page {n}",                                            # header
+        "Privacy Management Policy",                            # header
+        heading,                                                # distinct
+        body,                                                   # distinct, middle
+        "This standard clause appears on every single page.",    # repeated, middle
+        f"Closing note for {heading.lower()}.",                  # distinct
+        f"Continued discussion of {heading.lower()} follows.",   # distinct
+        "Confidential - Internal Use Only",                      # footer
+    ])
+
+
+def test_strip_repeated_lines_removes_headers_and_footers():
+    pages = [
+        _fake_page(1, "Purpose", "The lawful basis for processing is documented."),
+        _fake_page(2, "Scope", "All systems storing personal data are covered."),
+        _fake_page(3, "Policy", "Retention periods are defined per data class."),
+        _fake_page(4, "Compliance", "Audit evidence is retained for seven years."),
+    ]
+    cleaned = strip_repeated_lines(pages)
+
+    assert not any("Page" in p for p in cleaned)              # digits masked
+    assert not any("Privacy Management Policy" in p for p in cleaned)
+    assert not any("Confidential" in p for p in cleaned)      # footer
+    assert "Retention periods are defined per data class." in cleaned[2]
+    assert "Policy" in cleaned[2]
+
+
+def test_strip_repeated_lines_spares_repeats_in_page_body():
+    """Position is the guard: a line repeating mid-page is content, not a
+    running header, however often it recurs."""
+    pages = [
+        _fake_page(1, "Purpose", "distinct body one"),
+        _fake_page(2, "Scope", "distinct body two"),
+        _fake_page(3, "Policy", "distinct body three"),
+        _fake_page(4, "Compliance", "distinct body four"),
+    ]
+    cleaned = strip_repeated_lines(pages)
+
+    clause = "This standard clause appears on every single page."
+    assert all(clause in p for p in cleaned)
+
+def test_strip_repeated_lines_spares_long_repeated_text():
+    """Only short lines are eligible — a repeated legal paragraph is content."""
+    boiler = ("This document is confidential and proprietary to the organization "
+              "and may not be reproduced without prior written consent of counsel.")
+    pages = [f"{boiler}\nPage {n}" for n in (1, 2, 3, 4)]
+    cleaned = strip_repeated_lines(pages)
+
+    assert all(boiler in p for p in cleaned)
+    assert not any("Page" in p for p in cleaned)
+
+
+def test_strip_repeated_lines_skips_short_documents():
+    pages = ["Header\nbody one", "Header\nbody two"]
+    assert strip_repeated_lines(pages) == pages       # under min_pages
+
+
+# ── markdown preprocessing ───────────────────────────────────────────────
+
+def test_split_frontmatter_extracts_title_and_removes_block():
+    raw = ('---\ntitle: "Data Protection Impact Assessment (DPIA)"\n'
+           'description: "why DPIAs matter"\n---\nGitLab is fully committed to...')
+    title, body = split_frontmatter(raw)
+
+    assert title == "Data Protection Impact Assessment (DPIA)"
+    assert body.startswith("GitLab is fully committed")
+    assert "description:" not in body
+
+
+def test_split_frontmatter_passthrough_when_absent():
+    title, body = split_frontmatter("# Heading\n\nbody")
+    assert title is None and body == "# Heading\n\nbody"
+
+
+def test_strip_markdown_noise():
+    raw = ('{{% details summary="Law Enforcement Requests" %}}\n'
+           "Click the [GitLab Privacy Center](https://privacy.gitlab.com/) option.\n"
+           "![diagram](flow.png)")
+    out = strip_markdown_noise(raw)
+
+    assert "{{%" not in out and "https://" not in out and "![" not in out
+    assert "GitLab Privacy Center" in out
+
+
+def test_load_markdown_uses_frontmatter_title(tmp_path):
+    p = tmp_path / "gitlab-privacy-gdpr.md"
+    p.write_text(
+        '---\ntitle: Personal Data Requests\n---\n'
+        "Under various global data privacy laws, users have the right to request data.\n",
+        encoding="utf-8",
+    )
+    doc = load_document(p)
+
+    assert doc.title == "Personal Data Requests"
+    assert doc.doc_id == "gitlab-privacy-gdpr"
+    assert "title:" not in doc.text
+
+
+def test_looks_like_heading():
+    assert looks_like_heading("Purpose")
+    assert looks_like_heading("Roles and Responsibilities")
+    assert not looks_like_heading("Our policy aims to protect personal data.")
+    assert not looks_like_heading("   ")
+
+def test_strip_markdown_noise_removes_css_and_html():
+    raw = (
+        "<style>\n.tg td{border-color:black;border-style:solid;}\n</style>\n"
+        "<p>GitLab reviews each request.</p>\n"
+        ".tg {border-collapse:collapse;border-spacing:0;}\n"
+        "Requests are logged."
+    )
+    out = strip_markdown_noise(raw)
+
+    assert "border-collapse" not in out
+    assert "border-color" not in out
+    assert "<p>" not in out
+    assert "GitLab reviews each request." in out
+    assert "Requests are logged." in out
+
+
+def test_strip_markdown_noise_removes_css_and_html():
+    raw = (
+        "<style>\n.tg td{border-color:black;border-style:solid;}\n</style>\n"
+        "<p>GitLab reviews each request.</p>\n"
+        ".tg {border-collapse:collapse;border-spacing:0;}\n"
+        "Requests are logged."
+    )
+    out = strip_markdown_noise(raw)
+
+    assert "border-collapse" not in out
+    assert "border-color" not in out
+    assert "<p>" not in out
+    assert "GitLab reviews each request." in out
+    assert "Requests are logged." in out
+
+
+def test_strip_markdown_noise_removes_css_and_html():
+    raw = (
+        "<style>\n.tg td{border-color:black;border-style:solid;}\n</style>\n"
+        "<p>GitLab reviews each request.</p>\n"
+        ".tg {border-collapse:collapse;border-spacing:0;}\n"
+        "Requests are logged."
+    )
+    out = strip_markdown_noise(raw)
+
+    assert "border-collapse" not in out
+    assert "border-color" not in out
+    assert "<p>" not in out
+    assert "GitLab reviews each request." in out
+    assert "Requests are logged." in out
+
+
+def test_strip_markdown_noise_keeps_table_rows():
+    """Markdown tables are content. Only HTML/CSS is noise."""
+    raw = "| Type | Count |\n|------|:-----:|\n| Subpoena | 12 |"
+    assert strip_markdown_noise(raw) == raw
