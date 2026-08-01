@@ -1,7 +1,7 @@
 import pytest
 
 from app.core.chunking import (
-    MAX_TOKENS_HARD, TARGET_TOKENS, build_chunks, estimate_tokens,
+    MAX_TOKENS_HARD, MIN_TAIL_TOKENS, TARGET_TOKENS, build_chunks, estimate_tokens,
     split_into_blocks,
 )
 from app.core.loaders import LoadedDocument, PageSpan, normalize
@@ -156,7 +156,7 @@ def test_table_beyond_hard_cap_splits_on_row_boundaries():
     joined = "\n".join(c.text for c in chunks)
     assert joined.count("| Request 200 |") == 1
     assert joined.count("| Request 399 |") == 1
-    
+
 # ── sizing and overlap ───────────────────────────────────────────────────
 
 def test_chunks_respect_target_size():
@@ -242,3 +242,25 @@ def test_document_with_no_headings_still_chunks():
 def test_estimate_tokens_is_monotonic():
     assert estimate_tokens("") >= 1
     assert estimate_tokens("a" * 400) > estimate_tokens("a" * 100)
+
+def test_overlap_starts_at_a_sentence_boundary():
+    """A chunk must not open with the tail of the previous chunk's sentence."""
+    body = " ".join(
+        f"Clause {n} governs the retention of personal data." for n in range(1, 200)
+    )
+    chunks = build_chunks(make_doc(f"Retention\n{body}"))
+
+    assert len(chunks) > 2
+    for chunk in chunks[1:]:
+        assert chunk.text.startswith("Clause")
+
+
+def test_short_tail_is_absorbed_into_the_previous_chunk():
+    """Within a section, no chunk is left as an unanswerable fragment."""
+    body = " ".join(
+        f"Requirement {n} applies to all processing of personal data." for n in range(1, 95)
+    )
+    chunks = build_chunks(make_doc(f"Safeguards\n{body}"))
+
+    assert len(chunks) > 1
+    assert all(c.meta.token_count >= MIN_TAIL_TOKENS for c in chunks)

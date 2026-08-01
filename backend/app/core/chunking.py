@@ -25,7 +25,7 @@ TARGET_TOKENS = 250
 OVERLAP_TOKENS = 40
 MIN_CHUNK_TOKENS = 20
 MAX_TOKENS_HARD = 600          # tables may exceed TARGET; never exceed this
-
+MIN_TAIL_TOKENS = 60           # below this, a trailing fragment merges backwards
 _MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 
@@ -157,6 +157,28 @@ def _split_table_rows(text: str, block: Block) -> list[tuple[int, int]]:
 
     return spans or [(block.char_start, block.char_end)]
 
+
+def _overlap_start(text: str, span: tuple[int, int], boundaries: list[int]) -> int:
+    """Start the next chunk at the sentence boundary nearest the ideal overlap.
+
+    Snapping to a word boundary is not enough: a chunk opening 'for data
+    privacy. PRV-06 Ensure...' carries a sentence fragment that belongs to the
+    previous chunk. It embeds poorly and reads badly as a citation quote.
+    """
+    chunk_start, chunk_end = span
+    ideal = chunk_end - OVERLAP_TOKENS * 4
+
+    inside = [b for b in boundaries if chunk_start < b < chunk_end]
+    at_or_after = [b for b in inside if b >= ideal]
+
+    if at_or_after:
+        start = min(at_or_after)
+    elif inside:
+        start = max(inside)
+    else:
+        start = max(chunk_start, ideal)
+
+    return _snap_forward(text, start, chunk_end)
 # ──────────────────────────── chunk assembly ─────────────────────────────
 
 
@@ -189,17 +211,16 @@ def _pack(text: str, block: Block) -> list[tuple[int, int]]:
     for boundary in boundaries:
         if estimate_tokens(text[start:boundary]) >= TARGET_TOKENS:
             spans.append((start, boundary))
-            # overlap: step back roughly OVERLAP_TOKENS worth of characters
-            start = max(start, boundary - OVERLAP_TOKENS * 4)
-            start = _snap_forward(text, start, boundary)
+            start = _overlap_start(text, spans[-1], boundaries)
         last = boundary
 
-    if last > start and estimate_tokens(text[start:last]) >= MIN_CHUNK_TOKENS:
-        spans.append((start, last))
-    elif spans and last > start:
-        # tail too small to stand alone — extend the previous chunk
-        prev_start, _ = spans[-1]
-        spans[-1] = (prev_start, last)
+    if last > start:
+        if not spans or estimate_tokens(text[start:last]) >= MIN_TAIL_TOKENS:
+            spans.append((start, last))
+        else:
+            # fragment too small to answer anything on its own — absorb it
+            prev_start, _ = spans[-1]
+            spans[-1] = (prev_start, last)
 
     return spans or [(block.char_start, block.char_end)]
 
