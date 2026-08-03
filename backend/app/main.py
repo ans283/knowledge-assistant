@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.core.store import get_collection
+from app.api import ingest as ingest_api
+
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
@@ -22,3 +24,5 @@ def health():
         "collection": col.name,
         "chunks_indexed": col.count(),
     }
+
+app.include_router(ingest_api.router)
