@@ -26,3 +26,9 @@ def health():
     }
 
 app.include_router(ingest_api.router)
+
+@app.on_event("startup")
+def warm_indexes():
+    """Build the BM25 index from what's already in Chroma."""
+    from app.core.retriever import ensure_bm25
+    ensure_bm25()

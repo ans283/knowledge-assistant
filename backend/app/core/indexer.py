@@ -127,6 +127,9 @@ def ingest_corpus(
             log.exception("unexpected failure ingesting %s", path)
             errors.append(f"{Path(path).name}: unexpected error: {exc}")
 
+    from app.core.retriever import get_bm25_index
+    get_bm25_index().build(collection)
+    
     return IngestResponse(
         documents_processed=processed,
         chunks_added=added,
