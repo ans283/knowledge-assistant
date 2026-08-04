@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
 
     # --- abstention gate (used from Step 9) ---
-    min_rerank_score: float = 0.30
-
-
+    min_rerank_score: float = -3.0
+    max_dense_distance: float = 0.75
 settings = Settings()

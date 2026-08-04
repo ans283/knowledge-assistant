@@ -124,6 +124,7 @@ class Trace(BaseModel):
     output_tokens: int | None = None
     abstained_before_llm: bool = False
     citations_dropped: int = 0
+    injection_flagged: int = 0
 
 
 class QueryRequest(BaseModel):
