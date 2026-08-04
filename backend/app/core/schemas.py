@@ -84,6 +84,8 @@ class LLMCitation(BaseModel):
 
 class LLMAnswer(BaseModel):
     """Raw parsed JSON from the generator, pre-verification."""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     answer: str
     citations: list[LLMCitation] = Field(default_factory=list)
     insufficient_context: bool = False
