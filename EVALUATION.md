@@ -1,6 +1,6 @@
 # Evaluation
 
-Generated 2026-08-06 18:15 UTC · mode `hybrid_rerank` · top_k 5 · provider `mock` · 36.6s
+Generated 2026-08-07 03:40 UTC · mode `hybrid_rerank` · top_k 5 · provider `mock` · 106.2s
 
 Regenerate with `python -m eval.run_eval`. Retrieval and abstention metrics require no API key.
 
