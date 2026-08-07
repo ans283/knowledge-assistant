@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.core.loaders import LoadedDocument, looks_like_heading
+from app.core.loaders import _BULLET, LoadedDocument, looks_like_heading
 from app.core.schemas import Chunk, ChunkMeta
 
 TARGET_TOKENS = 250
@@ -65,6 +65,10 @@ def _heading_level(line: str) -> tuple[int, str] | None:
     m = _MD_HEADING.match(stripped)
     if m:
         return len(m.group(1)), m.group(2).strip()
+
+    # markdown rules and list items are not headings
+    if re.fullmatch(r"[-*_]{3,}", stripped) or _BULLET.match(stripped):
+        return None
 
     if looks_like_heading(stripped) and len(stripped.split()) <= 8:
         return 1, stripped
